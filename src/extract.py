@@ -1,21 +1,19 @@
-import tqdm
-from transformers import AutoModel
-from pathlib import Path
-import soundfile as sf
-import pandas as pd
-import torch
-from torch.utils.data import DataLoader
-from internal_tools.dataset_utils import AnnotatedAudioDataset, aadl_collate_fn
-from internal_tools.preprocessors import AudioPreprocessor
-from internal_tools.extractors import AudioModelExtractor
-
-from dotenv import load_dotenv
-import gc
-
-from fastabx import Dataset, Task, Score
-from src.config import MODELDIR
-
 import argparse
+import gc
+import json
+from pathlib import Path
+
+import pandas as pd
+import soundfile as sf
+import torch
+import tqdm
+from dotenv import load_dotenv
+from internal_tools.dataset_utils import AnnotatedAudioDataset, aadl_collate_fn
+from internal_tools.extractors import AudioModelExtractor
+from torch.utils.data import DataLoader
+
+from src.config import ACTIVATIONDIR
+from src.models import get_model
 
 load_dotenv()
 
@@ -37,43 +35,34 @@ def make_annotations(audio_dir: str | Path, file_format: str = "flac") -> pd.Dat
     return pd.DataFrame(rows)
 
 
-def get_model(model_name_or_path: str):
-    match model_name_or_path:
-        case "facebook/wav2vec2-base":
-            model = AutoModel.from_pretrained(model_name_or_path, cache_dir=MODELDIR)
-            preprocessor = AudioPreprocessor.for_hf_model(model_name_or_path)
-        case _:
-            raise ValueError(f"Unsupported model: {model_name_or_path}")
-    return model, preprocessor
-
-
-def evaluate_abx(
+def extract(
     model_name_or_path: str,
     audio_dir: str | Path,
-    file_format: str,
-    path_items: str | Path,
-    path_audio_flat: str | Path,
+    file_format: str = "flac",
+    out_dir: str | Path = ACTIVATIONDIR,
 ):
     """
-    Evaluate the model on the ABX task.
+    Save the activations of every layer of the model for every audio file in audio_dir.
 
     Args:
-        model_name_or_path (str): The name or path of the model.
-        audio_dir (str | Path): The directory containing the audio files.
+        model_name_or_path (str): The name or path of the model (see src/models.py).
+        audio_dir (str | Path): The directory containing the audio files (searched recursively).
         file_format (str): The format of the audio files (e.g., "flac").
-        path_items (str | Path): The path to the items file for the ABX task.
-        path_audio_flat (str | Path): The path to the flattened audio directory.
+        out_dir (str | Path): Activations go to <out_dir>/<model name>/<layer>/<file id>.pt.
     """
     audio_dir = Path(audio_dir)
-    path = Path(path_audio_flat)
+    model_dir = Path(out_dir) / Path(model_name_or_path).name
 
-    model, preprocessor = get_model(model_name_or_path)
+    model, preprocessor, frequency = get_model(model_name_or_path)
+    model.eval().to(device)
     annotations = make_annotations(audio_dir, file_format=file_format)
     dataset = AnnotatedAudioDataset(annotations, audio_dir, file_format=file_format)
-    batch_size = 8
+    # one file at a time: no padding frames in the activations, and models that normalize
+    # over the whole input (e.g. wav2vec2-base group norm) see exactly the unpadded audio
+    batch_size = 1
     dl = DataLoader(dataset, batch_size=batch_size, collate_fn=aadl_collate_fn)
     extr = AudioModelExtractor(model)
-    activations = {}
+    layers = None
 
     for batch_data in tqdm.tqdm(
         dl, desc=f"Extracting activations for {len(dl)} batches", total=len(dl)
@@ -86,14 +75,24 @@ def evaluate_abx(
             padding_side="right",
         ).to(device)
 
-        outputs = model(inputs.input_values.to(device))
+        with torch.no_grad():
+            if model_name_or_path == "melhubert":
+                outputs = model(inputs.input_values, inputs.attention_mask)
+            else:
+                outputs = model(inputs.input_values)
 
-        # save activations in memory
+        # save activations to disk, one file per layer and audio file
         extracted_acts = extr.get_activations()
-        for layer in extracted_acts.keys():
-            for path, act in zip(batch_data["audio_path"], extracted_acts[layer]):
-                activations.setdefault(layer, {})
-                activations[layer][Path(path).stem] = act
+        layers = list(extracted_acts.keys())
+        for layer in layers:
+            layer_dir = model_dir / layer
+            layer_dir.mkdir(parents=True, exist_ok=True)
+            for audio_path, act in zip(batch_data["audio_path"], extracted_acts[layer]):
+                # contiguous copy, so only this file's frames are saved (not the whole batch's storage)
+                torch.save(
+                    act.clone(memory_format=torch.contiguous_format),
+                    layer_dir / f"{Path(audio_path).stem}.pt",
+                )
 
         # clean
         extr.clear()
@@ -101,38 +100,15 @@ def evaluate_abx(
         gc.collect()
         torch.cuda.empty_cache()
 
-    results = []
-    model_name = Path(model_name_or_path).name
-    results_path = Path("results") / model_name / "abx.csv"
-    for layer in activations.keys():
-        # map path to activations
-        def maker(path: str) -> torch.Tensor:
-            return activations[layer][Path(path).stem]
-
-        dataset = Dataset.from_item(
-            path_items, path, frequency=50, feature_maker=maker, extension=".flac"
-        )
-        task = Task(dataset, on="#phone", by=["speaker", "next-phone", "prev-phone"])
-        score = Score(task, "angular")
-        error_rate = score.collapse(levels=[("next-phone", "prev-phone"), "speaker"])
-        results.append(
-            {
-                "model": model_name,
-                "condition": "within-speaker",
-                "layer": layer,
-                "error_rate": error_rate,
-                "accuracy": 1 - error_rate,
-                "item": path_items,
-            }
-        )
-        # clean
-        del dataset, task, score
-        gc.collect()
-
-    # save results
-    results_path.parent.mkdir(exist_ok=True, parents=True)
-    pd.DataFrame(results).to_csv(results_path, index=False)
-    print(f"Saved results to {results_path}")
+    # what run_abx.py needs to read the activations back
+    info = {
+        "model": model_name_or_path,
+        "frequency": frequency,
+        "layers": layers,
+        "audio_dir": str(audio_dir),
+    }
+    (model_dir / "info.json").write_text(json.dumps(info, indent=2))
+    print(f"Saved activations to {model_dir}")
 
 
 if __name__ == "__main__":
@@ -141,16 +117,19 @@ if __name__ == "__main__":
         "model_name_or_path", type=str, help="Path to the model or model name"
     )
     parser.add_argument("audio_dir", type=str, help="Path to the audio directory")
-    parser.add_argument("file_format", type=str, help="Audio file format")
-    parser.add_argument("path_items", type=str, help="Path to the items file")
     parser.add_argument(
-        "path_audio_flat", type=str, help="Path to the flattened audio directory"
+        "--file_format", type=str, default="flac", help="Audio file format"
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=ACTIVATIONDIR,
+        help="Where to save the activations",
     )
     args = parser.parse_args()
-    evaluate_abx(
+    extract(
         args.model_name_or_path,
         audio_dir=args.audio_dir,
         file_format=args.file_format,
-        path_items=args.path_items,
-        path_audio_flat=args.path_audio_flat,
+        out_dir=args.out_dir,
     )

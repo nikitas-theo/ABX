@@ -1,0 +1,10 @@
+__pycache__
+.venv
+.vscode
+data
+items
+.ruff_cache
+models
+internal_tools
+results
+.env

@@ -53,6 +53,10 @@ def get_model(model_name_or_path: str):
             )
         case "spidr":
             model = torch.hub.load("facebookresearch/spidr", "spidr_base")
+            # the channels-last CNN path calls F.conv2d with the conv weights directly, so the
+            # forward hook internal_tools puts on feature_extractor.conv_layers[-1].conv never fires;
+            # the standard path runs the same weights through that module
+            model.feature_extractor.channels_last = False
             preprocessor = AudioPreprocessor.for_spidr_model()
         case "cpc":
             model = load_CPC_model(MODELDIR / "cpc_checkpoint_106.pt")

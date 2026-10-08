@@ -4,6 +4,7 @@ import math
 from decimal import Decimal
 from pathlib import Path
 
+import polars as pl
 import torch
 from fastabx import Dataset, InMemoryAccessor, Task, Score, Subsampler
 from fastabx.dataset import read_labels
@@ -30,6 +31,10 @@ def get_task(task: str):
             return "within-speaker", zero_shot_triphone_within
         case "prosodic_across":
             return "across-speaker", prosodic_across
+        case "zero_shot_triphone_random":
+            return "random", zero_shot_triphone_random
+        case "prosodic_random":
+            return "random", prosodic_random
         case _:
             raise ValueError(f"Unknown task: {task}")
 
@@ -38,6 +43,8 @@ TASK_NAMES = [
     "zero_shot_triphone_within",
     "zero_shot_triphone_across",
     "prosodic_across",
+    "zero_shot_triphone_random",
+    "prosodic_random",
 ]
 
 
@@ -111,3 +118,45 @@ def load_dataset_clamped(path_items, features_dir, frequency):
     return Dataset(
         labels=labels, accessor=InMemoryAccessor(indices, torch.cat(segments), device)
     )
+
+
+# --- random baselines, like the "random" triplets in internal_tools/tutorials/2_activation_analyses.ipynb ---
+
+
+def shuffle_labels(dataset, on, by):
+    """Return the dataset with the ON labels shuffled within each BY group.
+
+    The task then has the same cells and cell sizes as the real one, but whether A and X share a
+    category is random, so the expected accuracy is chance (0.5).
+    """
+    labels = dataset.labels.with_columns(pl.col(on).shuffle(seed=SEED).over(by))
+    return Dataset(labels=labels, accessor=dataset.accessor)
+
+
+def zero_shot_triphone_random(path_items, features_dir, frequency=50):
+    """Control for zero_shot_triphone_within: the same task with #phone shuffled within each cell."""
+    dataset = Dataset.from_item(path_items, features_dir, frequency=frequency)
+    by = ["speaker", "next-phone", "prev-phone"]
+    task = Task(
+        shuffle_labels(dataset, "#phone", by),
+        on="#phone",
+        by=by,
+        subsampler=Subsampler(
+            max_size_group=MAX_SIZE_GROUP, max_x_across=None, seed=SEED
+        ),
+    )
+    score = Score(task, "angular")
+    return score.details(levels=LEVELS).to_dicts()
+
+
+def prosodic_random(path_items, features_dir, frequency=50):
+    """Control for prosodic_across: the same task with the stress labels shuffled within each word."""
+    dataset = load_dataset_clamped(path_items, features_dir, frequency)
+    task = Task(
+        shuffle_labels(dataset, "accent_pattern", ["phone_sequence"]),
+        on="accent_pattern",
+        by=["phone_sequence"],
+        across=["speaker"],
+    )
+    score = Score(task, "angular")
+    return score.details(levels=["speaker"]).to_dicts()

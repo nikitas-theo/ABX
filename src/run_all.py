@@ -35,7 +35,11 @@ from src.extract import extract
 from src.run_abx import evaluate_abx
 
 ZEROSPEECH_ITEMS = ITEMDIR / "zerospeech2021-triphone" / "item"
-ZERO_SHOT_TASKS = ["zero_shot_triphone_within", "zero_shot_triphone_across"]
+ZERO_SHOT_TASKS = [
+    "zero_shot_triphone_within",
+    "zero_shot_triphone_across",
+    "zero_shot_triphone_random",
+]
 # evaluation set: audio, its file format, the item file, and the ABX tasks to run on it
 EVALS = {
     **{
@@ -52,7 +56,7 @@ EVALS = {
             audio_dir=DATADIR / "prosodic" / name,
             file_format="wav",
             path_items=ITEMDIR / "prosodic" / f"{name}.csv",
-            tasks=["prosodic_across"],
+            tasks=["prosodic_across", "prosodic_random"],
         )
         for name in ["stress", "stress_syn", "stress_kokoro"]
     },

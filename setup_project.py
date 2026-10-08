@@ -1,43 +1,31 @@
 """Set up everything ABX needs, in order:
 
-1. LibriSpeech audio            -> data/LibriSpeech/<split>/
-2. internal_tools (pinned)      -> external/internal_tools/
-3. Python environment           (uv sync)
-4. Model weights                -> models/
+1. internal_tools (pinned)      -> external/internal_tools/
+2. Python environment           (uv sync)
+3. Model weights                -> models/
 
-The ZeroSpeech 2021 item files are committed in items/ (from
-https://cognitive-ml.fr/downloads/phoneme-discovery/zerospeech2021-triphone.tar.gz).
-
-Safe to re-run: each step skips what is already there.
-Uses only the standard library, so it runs with any Python 3.8+ before the environment exists.
+Then prepare the ABX benchmarks' audio and item files with src/prepare_tasks.py.
 
 Usage:
     python3 setup_project.py
-    python3 setup_project.py --splits dev-clean test-clean --models facebook/wav2vec2-base cpc
+    python3 setup_project.py --models facebook/wav2vec2-base cpc
 """
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
-LIBRISPEECH = DATA / "LibriSpeech"
 EXTERNAL = ROOT / "external"
 MODELS = ROOT / "models"
-
-LIBRISPEECH_URL = "https://www.openslr.org/resources/12/{split}.tar.gz"
 INTERNAL_TOOLS_REPO = "https://github.com/mdhk/internal_tools.git"
 INTERNAL_TOOLS_REV = "11dac9c"
-# CPC and MelHuBERT checkpoints come from the internal_tools tutorial models.zip on Google Drive,
-# see internal_tools/tutorials/download_tutorial_files.sh
+
+# CPC and MelHuBERT checkpoints come from the internal_tools tutorial models.zip on Google Drive
 TUTORIAL_MODELS_GDRIVE_ID = "129Fkg_bQpVB_yN-YT5MVK6ulZS_zjhH6"
 CHECKPOINTS = {
     "cpc": "cpc_checkpoint_106.pt",
@@ -52,61 +40,6 @@ def step(message):
 def run(*command):
     """Run a command from the project root, stopping the setup if it fails."""
     subprocess.run(command, cwd=ROOT, check=True)
-
-
-def download(url, dest):
-    """Download url to dest, via a .part file so an interrupted download is never mistaken for a finished one."""
-    if dest.exists():
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
-    print(f"    downloading {url}", flush=True)
-    with urllib.request.urlopen(url) as response, open(part, "wb") as f:
-        total = int(response.headers.get("Content-Length", 0))
-        done, last_shown = 0, -1
-        while chunk := response.read(1 << 20):
-            f.write(chunk)
-            done += len(chunk)
-            percent = 100 * done // total if total else 0
-            if total and percent // 10 != last_shown:
-                last_shown = percent // 10
-                print(f"    {percent}% of {total / 1e6:.0f} MB", flush=True)
-    part.rename(dest)
-
-
-def extract(archive, dest):
-    print(f"    extracting {archive.name}", flush=True)
-    with tarfile.open(archive) as tar:
-        if hasattr(
-            tarfile, "data_filter"
-        ):  # Python 3.12+: refuse unsafe paths in the archive
-            tar.extractall(dest, filter="data")
-        else:
-            tar.extractall(dest)
-
-
-def load_env_file():
-    """Read KEY=VALUE lines from .env (e.g. HF_TOKEN) so the download tools pick them up."""
-    env_file = ROOT / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
-def setup_librispeech(splits):
-    step(f"LibriSpeech ({', '.join(splits)}) -> {LIBRISPEECH.relative_to(ROOT)}/")
-    for split in splits:
-        if (LIBRISPEECH / split).is_dir():
-            continue
-        archive = DATA / f"{split}.tar.gz"
-        download(LIBRISPEECH_URL.format(split=split), archive)
-        extract(
-            archive, DATA
-        )  # the archive contains LibriSpeech/<split>/<speaker>/<chapter>/*.flac
 
 
 def setup_internal_tools():
@@ -132,7 +65,18 @@ def setup_models(models):
         elif model == "spidr":
             print("    spidr is loaded through torch.hub when it is first used")
         else:  # a HuggingFace model id
-            run("uv", "run", "hf", "download", model, "--cache-dir", str(MODELS))
+            # .env holds HF_TOKEN (optional) for authenticated downloads; uv errors if the file is missing
+            env_file = ["--env-file", ".env"] if (ROOT / ".env").exists() else []
+            run(
+                "uv",
+                "run",
+                *env_file,
+                "hf",
+                "download",
+                model,
+                "--cache-dir",
+                str(MODELS),
+            )
 
 
 def download_tutorial_checkpoint(filename):
@@ -155,12 +99,6 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--splits",
-        nargs="+",
-        default=["dev-clean", "dev-other"],
-        help="LibriSpeech splits: dev-clean dev-other test-clean test-other",
-    )
-    parser.add_argument(
         "--models",
         nargs="+",
         default=["facebook/wav2vec2-base"],
@@ -170,9 +108,7 @@ def main():
 
     if shutil.which("uv") is None:
         sys.exit("uv is not installed: https://docs.astral.sh/uv/")
-    load_env_file()
 
-    setup_librispeech(args.splits)
     setup_internal_tools()
     setup_environment()
     setup_models(args.models)

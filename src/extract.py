@@ -1,6 +1,7 @@
 import argparse
 import gc
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -40,6 +41,7 @@ def extract(
     audio_dir: str | Path,
     file_format: str = "flac",
     out_dir: str | Path = ACTIVATIONDIR,
+    batch_size: int = 16,
 ):
     """
     Save the activations of every layer of the model for every audio file in audio_dir.
@@ -49,6 +51,9 @@ def extract(
         audio_dir (str | Path): The directory containing the audio files (searched recursively).
         file_format (str): The format of the audio files (e.g., "flac").
         out_dir (str | Path): Activations go to <out_dir>/<model name>/<layer>/<file id>.pt.
+        batch_size (int): Files per forward pass. Files are sorted by duration, so padding is small
+            (median ~0.5% at 16), but the models attend to and normalize over it, so activations differ
+            slightly from one file at a time (batch_size=1, exact).
     """
     audio_dir = Path(audio_dir)
     model_dir = Path(out_dir) / Path(model_name_or_path).name
@@ -57,9 +62,6 @@ def extract(
     model.eval().to(device)
     annotations = make_annotations(audio_dir, file_format=file_format)
     dataset = AnnotatedAudioDataset(annotations, audio_dir, file_format=file_format)
-    # one file at a time: no padding frames in the activations, and models that normalize
-    # over the whole input (e.g. wav2vec2-base group norm) see exactly the unpadded audio
-    batch_size = 1
     dl = DataLoader(dataset, batch_size=batch_size, collate_fn=aadl_collate_fn)
     extr = AudioModelExtractor(model)
     layers = None
@@ -87,10 +89,18 @@ def extract(
         for layer in layers:
             layer_dir = model_dir / layer
             layer_dir.mkdir(parents=True, exist_ok=True)
-            for audio_path, act in zip(batch_data["audio_path"], extracted_acts[layer]):
+            for audio_path, signal, act in zip(
+                batch_data["audio_path"],
+                batch_data["audio_signal"],
+                extracted_acts[layer],
+            ):
+                # drop the frames that only cover batch padding: keep ceil(duration * frame rate),
+                # which is at most one frame past the end of the audio (never used by the item files)
+                duration = len(signal) / batch_data["audio_sampling_rate"]
+                n_frames = min(act.shape[0], math.ceil(duration * frequency))
                 # contiguous copy, so only this file's frames are saved (not the whole batch's storage)
                 torch.save(
-                    act.clone(memory_format=torch.contiguous_format),
+                    act[:n_frames].clone(memory_format=torch.contiguous_format),
                     layer_dir / f"{Path(audio_path).stem}.pt",
                 )
 
@@ -126,10 +136,14 @@ if __name__ == "__main__":
         default=ACTIVATIONDIR,
         help="Where to save the activations",
     )
+    parser.add_argument(
+        "--batch_size", type=int, default=16, help="Files per forward pass"
+    )
     args = parser.parse_args()
     extract(
         args.model_name_or_path,
         audio_dir=args.audio_dir,
         file_format=args.file_format,
         out_dir=args.out_dir,
+        batch_size=args.batch_size,
     )

@@ -34,17 +34,17 @@ def evaluate_abx(
         pair_scores = task_fn(
             path_items, model_dir / layer, frequency=info["frequency"]
         )
-        # one row per phone pair (A, B); the mean accuracy over pairs is the overall ABX accuracy
+        # one row per contrast (e.g. phone pair A, B) with its labels as returned by the task;
+        # the mean accuracy over rows is the overall ABX accuracy
         for pair in pair_scores:
+            labels = {k: v for k, v in pair.items() if k != "score"}
             results.append(
                 {
                     "model": model_name,
                     "condition": condition,
                     "layer": layer,
                     "depth": depth,
-                    "phone_a": pair["#phone"],
-                    "phone_b": pair["#phone_b"],
-                    "size": pair["size"],
+                    **labels,
                     "error_rate": pair["score"],
                     "accuracy": 1 - pair["score"],
                     "item": str(path_items),

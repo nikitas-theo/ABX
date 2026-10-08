@@ -3,7 +3,7 @@
 Reads <results dir>/<model>/<item>/abx_*.csv written by run_abx.py (one row per layer and contrast):
 the line is the mean accuracy over contrasts (= the overall ABX accuracy), the band its 95% CI.
 By default draws one figure per evaluation set (item) with every model that has results for it,
-to <results dir>/figures/abx_<item>.png.
+to <results dir>/figures/abx_<item>.png, and stacks them into one image, abx_all.png.
 
 Usage:
     python -m src.plot
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -117,6 +118,18 @@ def find_results(results_root=RESULTDIR):
     return {item: sorted(models, key=rank) for item, models in sorted(found.items())}
 
 
+def stack_images(paths, filepath):
+    """Stack the given figures vertically into one image, left-aligned on a white background."""
+    images = [plt.imread(p)[..., :3] for p in paths]  # drop alpha; PNGs are read as floats in [0, 1]
+    width = max(image.shape[1] for image in images)
+    padded = [
+        np.pad(image, ((0, 0), (0, width - image.shape[1]), (0, 0)), constant_values=1.0)
+        for image in images
+    ]
+    plt.imsave(filepath, np.concatenate(padded))
+    print(f"Saved {filepath}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -146,6 +159,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    saved = []
     for item, model_names in find_results(args.results_dir).items():
         if args.items and item not in args.items:
             continue
@@ -162,3 +176,7 @@ if __name__ == "__main__":
         )
         plt.close("all")
         print(f"Saved {filepath}")
+        saved.append(filepath)
+
+    if len(saved) > 1:
+        stack_images(saved, args.results_dir / "figures" / "abx_all.png")

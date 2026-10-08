@@ -5,39 +5,34 @@ one set are on disk, ~44 GB for LibriSpeech dev-clean at float32, a few MB for t
     1. extract.py  -> activations/<model>/<layer>/<file id>.pt
     2. run_abx.py  -> results/<model>/<item file name>/abx_<task>.csv, for every task of the set
     3. delete activations/<model>/
-Finally plot.py draws one figure per evaluation set with all models.
+Then plot with plot.py (one figure per evaluation set, with all models).
 
 Prepare the audio and item files first with src/prepare_tasks.py.
 A model/set whose results already exist is skipped, so the script can be re-run after a failure.
 
+With --fast, a quick dry run to check that everything works (e.g. on CPU): every evaluation set is
+cut down to a few files (items/fast/), only each model's first and last layer are scored, and results
+go to results/fast/.
+
 Usage:
     python -m src.run_all
     python -m src.run_all --models facebook/wav2vec2-base cpc --evals triphone-dev-clean stress
+    python -m src.run_all --fast
 """
 
 import argparse
 import gc
+import json
 import shutil
 import traceback
 from pathlib import Path
 
+import polars as pl
 import torch
 
-from src.config import ACTIVATIONDIR, DATADIR, ITEMDIR, RESULTDIR
+from src.config import ACTIVATIONDIR, DATADIR, ITEMDIR, MODELS, RESULTDIR
 from src.extract import extract
-from src.plot import load_results, plot_ABX_results
 from src.run_abx import evaluate_abx
-
-# the models of internal_tools/tutorials/2_activation_analyses.ipynb, in its plot order
-MODELS = [
-    "facebook/wav2vec2-base",
-    "microsoft/wavlm-base",
-    "spidr",
-    "facebook/hubert-base-ls960",
-    "MarvinLvn/BabyHuBERT",
-    "melhubert",
-    "cpc",
-]
 
 ZEROSPEECH_ITEMS = ITEMDIR / "zerospeech2021-triphone" / "item"
 ZERO_SHOT_TASKS = ["zero_shot_triphone_within", "zero_shot_triphone_across"]
@@ -62,16 +57,47 @@ EVALS = {
         for name in ["stress", "stress_syn", "stress_kokoro"]
     },
 }
+FAST_RESULTDIR = RESULTDIR / "fast"
+
+
+def read_items(path_items):
+    """Read an item file (.item: space separated, .csv: comma separated) with values kept as written."""
+    separator = " " if Path(path_items).suffix == ".item" else ","
+    return pl.read_csv(path_items, separator=separator, infer_schema=False), separator
+
+
+def make_fast_items(path_items):
+    """Write a small subset of an item file to items/fast/, for a quick dry run of the pipeline."""
+    items, separator = read_items(path_items)
+    if "phone_sequence" in items.columns:
+        # prosodic: 2 words with every speaker (A, B and X say the same word, X by another speaker)
+        words = sorted(items["phone_sequence"].unique())[:2]
+        items = items.filter(pl.col("phone_sequence").is_in(words))
+    else:
+        # zero_shot: 3 files from each of 2 speakers, enough for within- and across-speaker cells
+        speakers = sorted(items["speaker"].unique())[:2]
+        files = [
+            f
+            for s in speakers
+            for f in sorted(items.filter(pl.col("speaker") == s)["#file"].unique())[:3]
+        ]
+        items = items.filter(pl.col("#file").is_in(files))
+    fast_path = ITEMDIR / "fast" / Path(path_items).name
+    fast_path.parent.mkdir(parents=True, exist_ok=True)
+    items.write_csv(fast_path, separator=separator)
+    return fast_path
 
 
 def run_model_on_eval(
-    model_name_or_path, eval_name, batch_size=16, keep_activations=False
+    model_name_or_path, eval_name, batch_size=16, keep_activations=False, fast=False
 ):
     model_name = Path(
         model_name_or_path
     ).name  # folder name used by extract.py and run_abx.py
     spec = EVALS[eval_name]
-    results_dir = RESULTDIR / model_name / spec["path_items"].stem
+    path_items = make_fast_items(spec["path_items"]) if fast else spec["path_items"]
+    results_root = FAST_RESULTDIR if fast else RESULTDIR
+    results_dir = results_root / model_name / path_items.stem
     if all((results_dir / f"abx_{task}.csv").exists() for task in spec["tasks"]):
         print(f"Skipping {model_name} on {eval_name}: results already in {results_dir}")
         return
@@ -83,12 +109,23 @@ def run_model_on_eval(
             file_format=spec["file_format"],
             out_dir=ACTIVATIONDIR,
             batch_size=batch_size,
+            # only the audio files the item file uses
+            file_ids=set(read_items(path_items)[0]["#file"]),
         )
         gc.collect()
         torch.cuda.empty_cache()
+        layers = None  # all
+        if fast:
+            info = json.loads((ACTIVATIONDIR / model_name / "info.json").read_text())
+            layers = [info["layers"][0], info["layers"][-1]]
         for task in spec["tasks"]:
             evaluate_abx(
-                model_name, spec["path_items"], task, activations_dir=ACTIVATIONDIR
+                model_name,
+                path_items,
+                task,
+                activations_dir=ACTIVATIONDIR,
+                layers=layers,
+                results_dir=results_root,
             )
     finally:
         # delete the activations even if a step failed, so a failure never leaves ~44 GB behind
@@ -124,6 +161,11 @@ def main():
         action="store_true",
         help="Do not delete activations afterwards",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Quick dry run: a few files per evaluation set, first and last layer, results in results/fast/",
+    )
     args = parser.parse_args()
 
     # keep going if one model fails (e.g. a missing checkpoint), and report all failures at the end
@@ -137,25 +179,11 @@ def main():
                     eval_name,
                     args.batch_size,
                     args.keep_activations,
+                    args.fast,
                 )
             except Exception:
                 traceback.print_exc()
                 failed.append(f"{model_name_or_path} on {eval_name}")
-
-    # one figure per evaluation set, with every model that has results for it
-    for eval_name in args.evals:
-        item = EVALS[eval_name]["path_items"].stem
-        model_names = [
-            Path(m).name
-            for m in args.models
-            if list((RESULTDIR / Path(m).name / item).glob("abx_*.csv"))
-        ]
-        if model_names:
-            plot_ABX_results(
-                load_results(model_names, item),
-                title=f"ABX tests, trained models, {eval_name}",
-                filepath=RESULTDIR / "figures" / f"abx_{item}.png",
-            )
 
     if failed:
         print("\nFailed:\n  " + "\n  ".join(failed))

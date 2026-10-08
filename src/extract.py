@@ -22,10 +22,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # make dummy annotations file
-def make_annotations(audio_dir: str | Path, file_format: str = "flac") -> pd.DataFrame:
+def make_annotations(
+    audio_dir: str | Path, file_format: str = "flac", file_ids: set | None = None
+) -> pd.DataFrame:
     audio_dir = Path(audio_dir)
     rows = []
     for f in sorted(audio_dir.glob(f"**/*.{file_format}")):
+        if file_ids is not None and f.stem not in file_ids:
+            continue
         rows.append(
             {
                 "file_id": str(f.relative_to(audio_dir).with_suffix("")),
@@ -42,6 +46,7 @@ def extract(
     file_format: str = "flac",
     out_dir: str | Path = ACTIVATIONDIR,
     batch_size: int = 16,
+    file_ids: set | None = None,
 ):
     """
     Save the activations of every layer of the model for every audio file in audio_dir.
@@ -54,13 +59,17 @@ def extract(
         batch_size (int): Files per forward pass. Files are sorted by duration, so padding is small
             (median ~0.5% at 16), but the models attend to and normalize over it, so activations differ
             slightly from one file at a time (batch_size=1, exact).
+        file_ids (set | None): Only extract the files with these names (without extension),
+            e.g. the files an item file uses; all files in audio_dir if None.
     """
     audio_dir = Path(audio_dir)
     model_dir = Path(out_dir) / Path(model_name_or_path).name
 
     model, preprocessor, frequency = get_model(model_name_or_path)
     model.eval().to(device)
-    annotations = make_annotations(audio_dir, file_format=file_format)
+    annotations = make_annotations(
+        audio_dir, file_format=file_format, file_ids=file_ids
+    )
     dataset = AnnotatedAudioDataset(annotations, audio_dir, file_format=file_format)
     dl = DataLoader(dataset, batch_size=batch_size, collate_fn=aadl_collate_fn)
     extr = AudioModelExtractor(model)

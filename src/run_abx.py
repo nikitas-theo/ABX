@@ -14,6 +14,8 @@ def evaluate_abx(
     path_items: str | Path,
     task: str,
     activations_dir: str | Path = ACTIVATIONDIR,
+    layers: list[str] | None = None,
+    results_dir: str | Path = RESULTDIR,
 ):
     """
     Evaluate saved activations on the ABX task.
@@ -23,14 +25,20 @@ def evaluate_abx(
         path_items (str | Path): The path to the items file for the ABX task.
         task (str): One of TASK_NAMES (see src/tasks.py).
         activations_dir (str | Path): Where extract.py saved the activations.
+        layers (list[str] | None): Only score these layers; all extracted layers if None.
+        results_dir (str | Path): Results go to <results_dir>/<model>/<item file name>/abx_<task>.csv.
     """
     model_dir = Path(activations_dir) / model_name
     info = json.loads((model_dir / "info.json").read_text())
     condition, task_fn = get_task(task)
 
     results = []
-    results_path = RESULTDIR / model_name / Path(path_items).stem / f"abx_{task}.csv"
+    results_path = (
+        Path(results_dir) / model_name / Path(path_items).stem / f"abx_{task}.csv"
+    )
     for depth, layer in enumerate(info["layers"]):
+        if layers is not None and layer not in layers:
+            continue
         pair_scores = task_fn(
             path_items, model_dir / layer, frequency=info["frequency"]
         )

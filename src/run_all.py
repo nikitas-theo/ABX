@@ -122,15 +122,14 @@ def run_model_on_eval(
         if fast:
             info = json.loads((ACTIVATIONDIR / model_name / "info.json").read_text())
             layers = [info["layers"][0], info["layers"][-1]]
-        for task in spec["tasks"]:
-            evaluate_abx(
-                model_name,
-                path_items,
-                task,
-                activations_dir=ACTIVATIONDIR,
-                layers=layers,
-                results_dir=results_root,
-            )
+        evaluate_abx(
+            model_name,
+            path_items,
+            spec["tasks"],
+            activations_dir=ACTIVATIONDIR,
+            layers=layers,
+            results_dir=results_root,
+        )
     finally:
         # delete the activations even if a step failed, so a failure never leaves ~44 GB behind
         if not keep_activations:

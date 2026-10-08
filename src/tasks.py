@@ -1,4 +1,5 @@
-# triphone within- and across-speaker on clean and other
+# ABX tasks: ZeroSpeech 2021 triphone (within- and across-speaker) and Prosodic ABX (English stress),
+# each with a random baseline
 
 import math
 from decimal import Decimal
@@ -19,22 +20,24 @@ LEVELS = [("next-phone", "prev-phone"), "speaker"]
 
 
 def get_task(task: str):
-    """Return (condition, task function) for a task name.
+    """Return (condition, dataset loader, task function) for a task name.
 
-    Task functions return one row per phone pair (A, B): {"#phone", "#phone_b", "score", "size"},
-    where score is that pair's ABX error rate. Their mean is the overall ZeroSpeech error rate.
+    The loader builds the fastabx Dataset from (path_items, features_dir, frequency); tasks with the
+    same loader share one loaded dataset. Task functions take that dataset and return one row per
+    contrast (e.g. phone pair A, B) with its labels, "score" (that contrast's ABX error rate) and
+    "size"; the mean score over rows is the overall error rate.
     """
     match task:
-        case "zero_shot_triphone_across":
-            return "across-speaker", zero_shot_triphone_across
         case "zero_shot_triphone_within":
-            return "within-speaker", zero_shot_triphone_within
-        case "prosodic_across":
-            return "across-speaker", prosodic_across
+            return "within-speaker", load_dataset, zero_shot_triphone_within
+        case "zero_shot_triphone_across":
+            return "across-speaker", load_dataset, zero_shot_triphone_across
         case "zero_shot_triphone_random":
-            return "random", zero_shot_triphone_random
+            return "random", load_dataset, zero_shot_triphone_random
+        case "prosodic_across":
+            return "across-speaker", load_dataset_clamped, prosodic_across
         case "prosodic_random":
-            return "random", prosodic_random
+            return "random", load_dataset_clamped, prosodic_random
         case _:
             raise ValueError(f"Unknown task: {task}")
 
@@ -42,58 +45,22 @@ def get_task(task: str):
 TASK_NAMES = [
     "zero_shot_triphone_within",
     "zero_shot_triphone_across",
-    "prosodic_across",
     "zero_shot_triphone_random",
+    "prosodic_across",
     "prosodic_random",
 ]
 
 
-def zero_shot_triphone_within(path_items, features_dir, frequency=50):
-    # features_dir holds one <file id>.pt of shape (n_frames, dim) per audio file
-    dataset = Dataset.from_item(path_items, features_dir, frequency=frequency)
-    # A, B and X all come from the same speaker
-    task = Task(
-        dataset,
-        on="#phone",
-        by=["speaker", "next-phone", "prev-phone"],
-        subsampler=Subsampler(
-            max_size_group=MAX_SIZE_GROUP, max_x_across=None, seed=SEED
-        ),
-    )
-    score = Score(task, "angular")
-    return score.details(levels=LEVELS).to_dicts()
+# --- loading features ---
 
 
-def zero_shot_triphone_across(path_items, features_dir, frequency=50):
-    # features_dir holds one <file id>.pt of shape (n_frames, dim) per audio file
-    dataset = Dataset.from_item(path_items, features_dir, frequency=frequency)
-    # A and B from one speaker, X from a different speaker.
-    task = Task(
-        dataset,
-        on="#phone",
-        by=["next-phone", "prev-phone"],
-        across=["speaker"],
-        subsampler=Subsampler(
-            max_size_group=MAX_SIZE_GROUP, max_x_across=MAX_X_ACROSS, seed=SEED
-        ),
-    )
-    score = Score(task, "angular")
-    return score.details(levels=LEVELS).to_dicts()
+def load_dataset(path_items, features_dir, frequency=50):
+    """fastabx Dataset from an item file and features_dir/<file id>.pt of shape (n_frames, dim)."""
+    return Dataset.from_item(path_items, features_dir, frequency=frequency)
 
 
-def prosodic_across(path_items, features_dir, frequency=50):
-    """Prosodic ABX (https://arxiv.org/abs/2604.02102), as in the prosodic-abx repo's run_abx.py."""
-    dataset = load_dataset_clamped(path_items, features_dir, frequency)
-    # ON the stress pattern, BY the word (so only stress differs);
-    # A and B from one speaker, X from a different speaker. No subsampling.
-    task = Task(dataset, on="accent_pattern", by=["phone_sequence"], across=["speaker"])
-    score = Score(task, "angular")
-    # average over speakers, then over (word, contrast)
-    return score.details(levels=["speaker"]).to_dicts()
-
-
-def load_dataset_clamped(path_items, features_dir, frequency):
-    """Like Dataset.from_item, but a segment that runs past the end of its features is cut at the last frame.
+def load_dataset_clamped(path_items, features_dir, frequency=50):
+    """Like load_dataset, but a segment that runs past the end of its features is cut at the last frame.
 
     Whole-word items (onset 0, offset = clip duration) often end one frame past what the model's
     convolutions output, which Dataset.from_item rejects; the prosodic-abx repo clamps them like this.
@@ -120,6 +87,51 @@ def load_dataset_clamped(path_items, features_dir, frequency):
     )
 
 
+# --- ZeroSpeech 2021 triphone ABX ---
+
+
+def zero_shot_triphone_within(dataset):
+    # A, B and X all come from the same speaker
+    task = Task(
+        dataset,
+        on="#phone",
+        by=["speaker", "next-phone", "prev-phone"],
+        subsampler=Subsampler(
+            max_size_group=MAX_SIZE_GROUP, max_x_across=None, seed=SEED
+        ),
+    )
+    score = Score(task, "angular")
+    return score.details(levels=LEVELS).to_dicts()
+
+
+def zero_shot_triphone_across(dataset):
+    # A and B from one speaker, X from a different speaker.
+    task = Task(
+        dataset,
+        on="#phone",
+        by=["next-phone", "prev-phone"],
+        across=["speaker"],
+        subsampler=Subsampler(
+            max_size_group=MAX_SIZE_GROUP, max_x_across=MAX_X_ACROSS, seed=SEED
+        ),
+    )
+    score = Score(task, "angular")
+    return score.details(levels=LEVELS).to_dicts()
+
+
+# --- Prosodic ABX (https://arxiv.org/abs/2604.02102) ---
+
+
+def prosodic_across(dataset):
+    """As in the prosodic-abx repo's run_abx.py."""
+    # ON the stress pattern, BY the word (so only stress differs);
+    # A and B from one speaker, X from a different speaker. No subsampling.
+    task = Task(dataset, on="accent_pattern", by=["phone_sequence"], across=["speaker"])
+    score = Score(task, "angular")
+    # average over speakers, then over (word, contrast)
+    return score.details(levels=["speaker"]).to_dicts()
+
+
 # --- random baselines, like the "random" triplets in internal_tools/tutorials/2_activation_analyses.ipynb ---
 
 
@@ -133,30 +145,13 @@ def shuffle_labels(dataset, on, by):
     return Dataset(labels=labels, accessor=dataset.accessor)
 
 
-def zero_shot_triphone_random(path_items, features_dir, frequency=50):
+def zero_shot_triphone_random(dataset):
     """Control for zero_shot_triphone_within: the same task with #phone shuffled within each cell."""
-    dataset = Dataset.from_item(path_items, features_dir, frequency=frequency)
-    by = ["speaker", "next-phone", "prev-phone"]
-    task = Task(
-        shuffle_labels(dataset, "#phone", by),
-        on="#phone",
-        by=by,
-        subsampler=Subsampler(
-            max_size_group=MAX_SIZE_GROUP, max_x_across=None, seed=SEED
-        ),
+    return zero_shot_triphone_within(
+        shuffle_labels(dataset, "#phone", ["speaker", "next-phone", "prev-phone"])
     )
-    score = Score(task, "angular")
-    return score.details(levels=LEVELS).to_dicts()
 
 
-def prosodic_random(path_items, features_dir, frequency=50):
+def prosodic_random(dataset):
     """Control for prosodic_across: the same task with the stress labels shuffled within each word."""
-    dataset = load_dataset_clamped(path_items, features_dir, frequency)
-    task = Task(
-        shuffle_labels(dataset, "accent_pattern", ["phone_sequence"]),
-        on="accent_pattern",
-        by=["phone_sequence"],
-        across=["speaker"],
-    )
-    score = Score(task, "angular")
-    return score.details(levels=["speaker"]).to_dicts()
+    return prosodic_across(shuffle_labels(dataset, "accent_pattern", ["phone_sequence"]))

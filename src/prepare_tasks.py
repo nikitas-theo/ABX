@@ -27,9 +27,12 @@ import librosa
 import numpy as np
 import polars as pl
 import soundfile as sf
+from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
 
 from src.config import DATADIR, ITEMDIR
+
+load_dotenv()  # HF_TOKEN from .env, for authenticated downloads
 
 SAMPLING_RATE = 16000  # what all the models expect
 

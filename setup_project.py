@@ -59,9 +59,11 @@ def setup_environment():
 def setup_models(models):
     step(f"Models ({', '.join(models)}) -> {MODELS.relative_to(ROOT)}/")
     MODELS.mkdir(exist_ok=True)
+    # CPC and MelHuBERT come from the same zip, so it is downloaded once for both
+    download_tutorial_checkpoints([CHECKPOINTS[m] for m in models if m in CHECKPOINTS])
     for model in models:
         if model in CHECKPOINTS:
-            download_tutorial_checkpoint(CHECKPOINTS[model])
+            continue
         elif model == "spidr":
             print("    spidr is loaded through torch.hub when it is first used")
         else:  # a HuggingFace model id
@@ -79,19 +81,21 @@ def setup_models(models):
             )
 
 
-def download_tutorial_checkpoint(filename):
-    if (MODELS / filename).exists():
+def download_tutorial_checkpoints(filenames):
+    missing = [f for f in filenames if not (MODELS / f).exists()]
+    if not missing:
         return
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "models.zip"
         run("uvx", "gdown", TUTORIAL_MODELS_GDRIVE_ID, "-O", str(archive))
         with zipfile.ZipFile(archive) as zf:
             zf.extractall(tmp)
-        # the zip's folder layout is not documented, so search it for the checkpoint by name
-        found = list(Path(tmp).rglob(filename))
-        if not found:
-            sys.exit(f"{filename} not found in the tutorial models.zip")
-        shutil.move(str(found[0]), MODELS / filename)
+        for filename in missing:
+            # the zip's folder layout is not documented, so search it for the checkpoint by name
+            found = list(Path(tmp).rglob(filename))
+            if not found:
+                sys.exit(f"{filename} not found in the tutorial models.zip")
+            shutil.move(str(found[0]), MODELS / filename)
 
 
 def main():

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from src.config import ACTIVATIONDIR, RESULTDIR
 from src.tasks import get_task, TASK_NAMES
@@ -60,9 +61,10 @@ def evaluate_abx(
                 )
             error_rate = sum(pair["score"] for pair in pair_scores) / len(pair_scores)
             print(f"{layer} {task}: accuracy {1 - error_rate:.4f}")
-        # clean
+        # clean: free this layer's features on the GPU before the next layer is loaded
         del datasets
         gc.collect()
+        torch.cuda.empty_cache()
 
     # save results, one file per task
     for task, rows in results.items():

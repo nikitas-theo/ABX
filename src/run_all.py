@@ -20,6 +20,12 @@ Usage:
     python -m src.run_all --fast
 """
 
+import os
+
+# fewer "CUDA out of memory" failures from fragmentation when each layer's features are loaded onto
+# the GPU (set before torch is imported)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import argparse
 import gc
 import json
@@ -51,6 +57,16 @@ EVALS = {
         )
         for split in ["dev-clean", "dev-other"]
     },
+    # the same tasks on a ~10% sample of each split (10 speakers x 25 recordings), see prepare_tasks.py
+    **{
+        f"triphone-{split}-sample": dict(
+            audio_dir=DATADIR / "LibriSpeech" / split,
+            file_format="flac",
+            path_items=ZEROSPEECH_ITEMS.parent / "sample" / f"triphone-{split}-sample.item",
+            tasks=ZERO_SHOT_TASKS,
+        )
+        for split in ["dev-clean", "dev-other"]
+    },
     **{
         name: dict(
             audio_dir=DATADIR / "prosodic" / name,
@@ -61,6 +77,15 @@ EVALS = {
         for name in ["stress", "stress_syn", "stress_kokoro"]
     },
 }
+# run by default: the ~10% ZeroSpeech samples (all layers in reasonable time) and the stress sets;
+# the full splits are triphone-dev-clean / triphone-dev-other
+DEFAULT_EVALS = [
+    "triphone-dev-clean-sample",
+    "triphone-dev-other-sample",
+    "stress",
+    "stress_syn",
+    "stress_kokoro",
+]
 FAST_RESULTDIR = RESULTDIR / "fast"
 
 
@@ -92,8 +117,21 @@ def make_fast_items(path_items):
     return fast_path
 
 
+def select_layers(layers, every_n_layers=1):
+    """Every n-th layer, always including the first and the last."""
+    selected = layers[::every_n_layers]
+    if layers[-1] not in selected:
+        selected.append(layers[-1])
+    return selected
+
+
 def run_model_on_eval(
-    model_name_or_path, eval_name, batch_size=16, keep_activations=False, fast=False
+    model_name_or_path,
+    eval_name,
+    batch_size=16,
+    keep_activations=False,
+    fast=False,
+    every_n_layers=1,
 ):
     model_name = Path(
         model_name_or_path
@@ -118,10 +156,11 @@ def run_model_on_eval(
         )
         gc.collect()
         torch.cuda.empty_cache()
-        layers = None  # all
+        info = json.loads((ACTIVATIONDIR / model_name / "info.json").read_text())
         if fast:
-            info = json.loads((ACTIVATIONDIR / model_name / "info.json").read_text())
             layers = [info["layers"][0], info["layers"][-1]]
+        else:
+            layers = select_layers(info["layers"], every_n_layers)
         evaluate_abx(
             model_name,
             path_items,
@@ -149,7 +188,7 @@ def main():
     parser.add_argument(
         "--evals",
         nargs="+",
-        default=list(EVALS),
+        default=DEFAULT_EVALS,
         choices=list(EVALS),
         help="Evaluation sets to run",
     )
@@ -163,6 +202,12 @@ def main():
         "--keep_activations",
         action="store_true",
         help="Do not delete activations afterwards",
+    )
+    parser.add_argument(
+        "--every_n_layers",
+        type=int,
+        default=1,
+        help="Score every n-th layer (always including the first and last), e.g. 2 for about half",
     )
     parser.add_argument(
         "--fast",
@@ -183,6 +228,7 @@ def main():
                     args.batch_size,
                     args.keep_activations,
                     args.fast,
+                    args.every_n_layers,
                 )
             except Exception:
                 traceback.print_exc()

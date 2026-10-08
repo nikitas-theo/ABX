@@ -3,6 +3,9 @@
 zero_shot  ZeroSpeech 2021 triphone ABX on LibriSpeech
     audio  -> data/LibriSpeech/<split>/<speaker>/<chapter>/*.flac
     items  -> items/zerospeech2021-triphone/item/triphone-<split>.item
+    sample -> items/zerospeech2021-triphone/sample/triphone-<split>-sample.item, the same triphones for
+              10 speakers (5 F, 5 M) x 25 recordings, ~10% of the split, a size like the
+              internal_tools tutorial's phone sample, so every layer can be scored quickly
     from https://www.openslr.org/12 and https://docs.cognitive-ml.fr/fastabx/items.html
 
 prosodic   Prosodic ABX, English lexical stress (https://arxiv.org/abs/2604.02102)
@@ -84,6 +87,44 @@ def prepare_zero_shot(splits):
             # the archive contains LibriSpeech/<split>/<speaker>/<chapter>/*.flac
             archive = DATADIR / f"{split}.tar.gz"
             download_and_extract(LIBRISPEECH_URL.format(split=split), archive, DATADIR)
+        make_zerospeech_sample(split)
+
+
+SAMPLE_SPEAKERS_PER_SEX = 5
+SAMPLE_FILES_PER_SPEAKER = 25
+SAMPLE_SEED = 0
+
+
+def make_zerospeech_sample(split):
+    """Write the ZeroSpeech item file restricted to a few speakers and recordings (see module docstring)."""
+    sample_path = ZEROSPEECH_ITEMS / "sample" / f"triphone-{split}-sample.item"
+    if sample_path.exists():
+        return
+    # LibriSpeech's SPEAKERS.TXT: "ID | SEX | SUBSET | MINUTES | NAME", comment lines start with ";"
+    speakers = pl.read_csv(
+        DATADIR / "LibriSpeech" / "SPEAKERS.TXT", separator="|", comment_prefix=";",
+        has_header=False, new_columns=["id", "sex", "subset", "minutes", "name"],
+        infer_schema=False, truncate_ragged_lines=True,
+    ).with_columns(pl.all().str.strip_chars()).filter(pl.col("subset") == split)
+    selected = [
+        speaker
+        for sex in ["F", "M"]
+        for speaker in speakers.filter(pl.col("sex") == sex)["id"]
+        .sample(SAMPLE_SPEAKERS_PER_SEX, seed=SAMPLE_SEED).sort().to_list()
+    ]
+    items = pl.read_csv(
+        ZEROSPEECH_ITEMS / "item" / f"triphone-{split}.item", separator=" ", infer_schema=False
+    ).filter(pl.col("speaker").is_in(selected))
+    files = [
+        f
+        for speaker in selected
+        for f in items.filter(pl.col("speaker") == speaker)["#file"].unique().sort()
+        .sample(SAMPLE_FILES_PER_SPEAKER, seed=SAMPLE_SEED).to_list()
+    ]
+    items = items.filter(pl.col("#file").is_in(files))
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    items.write_csv(sample_path, separator=" ")
+    print(f"    sample: {len(items)} triphones, {len(files)} recordings, speakers {selected} -> {sample_path}")
 
 
 # --- prosodic: Prosodic ABX, English lexical stress ---

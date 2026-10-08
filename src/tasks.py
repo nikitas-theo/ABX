@@ -5,6 +5,7 @@ import math
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import torch
 from fastabx import Dataset, InMemoryAccessor, Task, Score, Subsampler
@@ -141,7 +142,15 @@ def shuffle_labels(dataset, on, by):
     The task then has the same cells and cell sizes as the real one, but whether A and X share a
     category is random, so the expected accuracy is chance (0.5).
     """
-    labels = dataset.labels.with_columns(pl.col(on).shuffle(seed=SEED).over(by))
+    # each group needs its own permutation: pl.col(on).shuffle(seed).over(by) would apply the same
+    # one to every group of the same size, i.e. a fixed relabeling that biases the baseline.
+    # Instead, sort the labels within each group by an independent random key per row.
+    key = np.random.default_rng(SEED).random(len(dataset.labels))
+    labels = (
+        dataset.labels.with_columns(_shuffle_key=pl.Series(key))
+        .with_columns(pl.col(on).sort_by("_shuffle_key").over(by))
+        .drop("_shuffle_key")
+    )
     return Dataset(labels=labels, accessor=dataset.accessor)
 
 

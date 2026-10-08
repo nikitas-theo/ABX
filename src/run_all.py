@@ -140,7 +140,9 @@ def run_model_on_eval(
     path_items = make_fast_items(spec["path_items"]) if fast else spec["path_items"]
     results_root = FAST_RESULTDIR if fast else RESULTDIR
     results_dir = results_root / model_name / path_items.stem
-    if all((results_dir / f"abx_{task}.csv").exists() for task in spec["tasks"]):
+    # only the tasks without results yet (e.g. after deleting one task's CSVs to recompute it)
+    tasks = [t for t in spec["tasks"] if not (results_dir / f"abx_{t}.csv").exists()]
+    if not tasks:
         print(f"Skipping {model_name} on {eval_name}: results already in {results_dir}")
         return
 
@@ -164,7 +166,7 @@ def run_model_on_eval(
         evaluate_abx(
             model_name,
             path_items,
-            spec["tasks"],
+            tasks,
             activations_dir=ACTIVATIONDIR,
             layers=layers,
             results_dir=results_root,

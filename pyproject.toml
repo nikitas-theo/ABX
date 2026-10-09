@@ -1,12 +1,12 @@
 [project]
 name = "abx"
 version = "0.1.0"
-description = "Add your description here"
+description = "ABX evaluation (ZeroSpeech 2021 triphones, Prosodic ABX stress) of self-supervised speech models, layer by layer"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
-    "fastabx>=0.9.0",
+    "fastabx>=0.9.0,<0.10",  # src/tasks.py uses fastabx.dataset.read_labels (not exported)
     "huggingface-hub>=1.31,<2",
     "internal-tools",
     "ipykernel>=7.4.0",

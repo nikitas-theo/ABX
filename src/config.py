@@ -1,3 +1,5 @@
+"""Paths and the model list shared by the scripts (paths are relative to the repo root)."""
+
 from pathlib import Path
 
 MODELDIR = Path("models")

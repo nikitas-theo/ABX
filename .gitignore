@@ -4,7 +4,6 @@ __pycache__
 data
 .ruff_cache
 models
-internal_tools
 results
 .env
 external

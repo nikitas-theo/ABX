@@ -1,9 +1,8 @@
 """Plot ABX accuracy per layer, one panel per model, as in internal_tools/tutorials/2_activation_analyses.ipynb.
 
-Reads <results dir>/<model>/<item>/abx_*.csv written by run_abx.py (one row per layer and contrast):
-the line is the mean accuracy over contrasts (= the overall ABX accuracy), the band its 95% CI.
-By default draws one figure per evaluation set (item) with every model that has results for it,
-to <results dir>/figures/abx_<item>.png, and stacks them into one image, abx_all.png.
+Reads <results dir>/<model>/<item>/abx_*.csv from run_abx.py: the line is the mean accuracy over
+contrasts (= the overall ABX accuracy), the band its 95% CI. Draws one figure per evaluation set,
+<results dir>/figures/abx_<item>.png, and stacks them into abx_all.png.
 
 Usage:
     python -m src.plot
@@ -48,7 +47,7 @@ def plot_ABX_results(ABX_results: dict, title="", filepath=None, show=True):
     mpl.rcParams["axes.edgecolor"] = "0.9"
 
     model_names = list(ABX_results)
-    # panel width proportional to the number of layers, so e.g. CPC (CNN, LSTM) gets a narrow panel
+    # panel width proportional to the number of layers, e.g. a narrow one for CPC
     n_layers = [ABX_results[m]["layer"].nunique() for m in model_names]
     width_ratios = [max(n, 2) / max(n_layers) for n in n_layers]
 
@@ -84,12 +83,12 @@ def plot_ABX_results(ABX_results: dict, title="", filepath=None, show=True):
         ax.legend().remove()
         ax.set_title(model_name, ha="left", x=0)
 
-    # one legend for the whole figure, with every condition that appears in any panel
+    # one legend for the whole figure
     handles = {}
     for ax in axs[0]:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             handles.setdefault(label, handle)
-    # legend just above the panels, title above the legend (so they never overlap on narrow figures)
+    # legend above the panels, title above the legend, so they never overlap
     fig.legend(
         handles.values(),
         handles.keys(),
@@ -119,11 +118,13 @@ def find_results(results_root=RESULTDIR):
 
 
 def stack_images(paths, filepath):
-    """Stack the given figures vertically into one image, left-aligned on a white background."""
-    images = [plt.imread(p)[..., :3] for p in paths]  # drop alpha; PNGs are read as floats in [0, 1]
+    """Stack figures vertically into one image, left-aligned on white."""
+    images = [plt.imread(p)[..., :3] for p in paths]  # RGB floats in [0, 1]
     width = max(image.shape[1] for image in images)
     padded = [
-        np.pad(image, ((0, 0), (0, width - image.shape[1]), (0, 0)), constant_values=1.0)
+        np.pad(
+            image, ((0, 0), (0, width - image.shape[1]), (0, 0)), constant_values=1.0
+        )
         for image in images
     ]
     plt.imsave(filepath, np.concatenate(padded))

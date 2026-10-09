@@ -1,20 +1,17 @@
 """Prepare the audio and item files for each ABX benchmark.
 
-zero_shot  ZeroSpeech 2021 triphone ABX on LibriSpeech
-    audio  -> data/LibriSpeech/<split>/<speaker>/<chapter>/*.flac
+zero_shot  ZeroSpeech 2021 triphone ABX on LibriSpeech (openslr.org/12, fastabx item files)
+    audio  -> data/LibriSpeech/<split>/
     items  -> items/zerospeech2021-triphone/item/triphone-<split>.item
-    sample -> items/zerospeech2021-triphone/sample/triphone-<split>-sample.item, the same triphones for
-              10 speakers (5 F, 5 M) x 25 recordings, ~10% of the split, a size like the
-              internal_tools tutorial's phone sample, so every layer can be scored quickly
-    from https://www.openslr.org/12 and https://docs.cognitive-ml.fr/fastabx/items.html
+    sample -> items/zerospeech2021-triphone/sample/triphone-<split>-sample.item: 10 speakers
+              (5 F, 5 M) x 25 recordings, ~10% of the split, so every layer can be scored quickly
 
-prosodic   Prosodic ABX, English lexical stress (https://arxiv.org/abs/2604.02102)
-    audio  -> data/prosodic/<set>/<id>.wav, one target word per file, 16 kHz mono
-    items  -> items/prosodic/<set>.csv, built from the dataset's word labels (it ships no item files)
-    sets: stress (natural speech, words cut out of sentences), stress_syn (Google TTS),
-          stress_kokoro (Kokoro TTS); from https://huggingface.co/datasets/HaitongSUN/prosody-abx
+prosodic   Prosodic ABX, English lexical stress (https://arxiv.org/abs/2604.02102), from the
+           HaitongSUN/prosody-abx dataset: stress (recorded), stress_syn (Google TTS), stress_kokoro
+    audio  -> data/prosodic/<set>/<id>.wav, one word per file, 16 kHz mono
+    items  -> items/prosodic/<set>.csv
 
-Safe to re-run: each step skips what is already there. Run after setup_project.py.
+Safe to re-run: existing files are skipped. Run after setup_project.py.
 
 Usage:
     python -m src.prepare_tasks zero_shot prosodic
@@ -35,12 +32,9 @@ from huggingface_hub import hf_hub_download
 
 from src.config import DATADIR, ITEMDIR
 
-load_dotenv()  # HF_TOKEN from .env, for authenticated downloads
+load_dotenv()  # HF_TOKEN
 
-SAMPLING_RATE = 16000  # what all the models expect
-
-
-# --- zero_shot: ZeroSpeech 2021 triphone ABX on LibriSpeech ---
+SAMPLING_RATE = 16000
 
 LIBRISPEECH_URL = "https://www.openslr.org/resources/12/{split}.tar.gz"
 ZEROSPEECH_ITEMS_URL = (
@@ -54,7 +48,7 @@ def download_and_extract(url, archive, dest):
     if not archive.exists():
         print(f"    downloading {url}")
         archive.parent.mkdir(parents=True, exist_ok=True)
-        # via a .part file, so an interrupted download is never mistaken for a finished one
+        # via a .part file, so an interrupted download is not mistaken for a finished one
         part = archive.with_name(archive.name + ".part")
         with urllib.request.urlopen(url) as response, open(part, "wb") as f:
             total = int(response.headers.get("Content-Length", 0))
@@ -78,13 +72,11 @@ def download_and_extract(url, archive, dest):
 def prepare_zero_shot(splits):
     print("==> zero_shot: ZeroSpeech 2021 triphone items")
     if not (ZEROSPEECH_ITEMS / "item").is_dir():
-        # the archive contains item/triphone-<split>.item for dev/test clean/other
         archive = DATADIR / "zerospeech2021-triphone.tar.gz"
         download_and_extract(ZEROSPEECH_ITEMS_URL, archive, ZEROSPEECH_ITEMS)
     for split in splits:
         print(f"==> zero_shot: LibriSpeech {split}")
         if not (DATADIR / "LibriSpeech" / split).is_dir():
-            # the archive contains LibriSpeech/<split>/<speaker>/<chapter>/*.flac
             archive = DATADIR / f"{split}.tar.gz"
             download_and_extract(LIBRISPEECH_URL.format(split=split), archive, DATADIR)
         make_zerospeech_sample(split)
@@ -96,42 +88,56 @@ SAMPLE_SEED = 0
 
 
 def make_zerospeech_sample(split):
-    """Write the ZeroSpeech item file restricted to a few speakers and recordings (see module docstring)."""
+    """The ZeroSpeech item file restricted to a few speakers and recordings."""
     sample_path = ZEROSPEECH_ITEMS / "sample" / f"triphone-{split}-sample.item"
     if sample_path.exists():
         return
-    # LibriSpeech's SPEAKERS.TXT: "ID | SEX | SUBSET | MINUTES | NAME", comment lines start with ";"
-    speakers = pl.read_csv(
-        DATADIR / "LibriSpeech" / "SPEAKERS.TXT", separator="|", comment_prefix=";",
-        has_header=False, new_columns=["id", "sex", "subset", "minutes", "name"],
-        infer_schema=False, truncate_ragged_lines=True,
-    ).with_columns(pl.all().str.strip_chars()).filter(pl.col("subset") == split)
+    # SPEAKERS.TXT lines: "ID | SEX | SUBSET | MINUTES | NAME"
+    speakers = (
+        pl.read_csv(
+            DATADIR / "LibriSpeech" / "SPEAKERS.TXT",
+            separator="|",
+            comment_prefix=";",
+            has_header=False,
+            new_columns=["id", "sex", "subset", "minutes", "name"],
+            infer_schema=False,
+            truncate_ragged_lines=True,
+        )
+        .with_columns(pl.all().str.strip_chars())
+        .filter(pl.col("subset") == split)
+    )
     selected = [
         speaker
         for sex in ["F", "M"]
         for speaker in speakers.filter(pl.col("sex") == sex)["id"]
-        .sample(SAMPLE_SPEAKERS_PER_SEX, seed=SAMPLE_SEED).sort().to_list()
+        .sample(SAMPLE_SPEAKERS_PER_SEX, seed=SAMPLE_SEED)
+        .sort()
+        .to_list()
     ]
     items = pl.read_csv(
-        ZEROSPEECH_ITEMS / "item" / f"triphone-{split}.item", separator=" ", infer_schema=False
+        ZEROSPEECH_ITEMS / "item" / f"triphone-{split}.item",
+        separator=" ",
+        infer_schema=False,
     ).filter(pl.col("speaker").is_in(selected))
     files = [
         f
         for speaker in selected
-        for f in items.filter(pl.col("speaker") == speaker)["#file"].unique().sort()
-        .sample(SAMPLE_FILES_PER_SPEAKER, seed=SAMPLE_SEED).to_list()
+        for f in items.filter(pl.col("speaker") == speaker)["#file"]
+        .unique()
+        .sort()
+        .sample(SAMPLE_FILES_PER_SPEAKER, seed=SAMPLE_SEED)
+        .to_list()
     ]
     items = items.filter(pl.col("#file").is_in(files))
     sample_path.parent.mkdir(parents=True, exist_ok=True)
     items.write_csv(sample_path, separator=" ")
-    print(f"    sample: {len(items)} triphones, {len(files)} recordings, speakers {selected} -> {sample_path}")
+    print(
+        f"    sample: {len(items)} triphones, {len(files)} recordings, speakers {selected} -> {sample_path}"
+    )
 
-
-# --- prosodic: Prosodic ABX, English lexical stress ---
 
 PROSODIC_HF_DATASET = "HaitongSUN/prosody-abx"
 PROSODIC_SETS = {
-    # set name: parquet file in the HF dataset
     "stress": "english_stress/english_stress.parquet",
     "stress_syn": "english_stress_syn/english_stress_syn.parquet",
     "stress_kokoro": "english_stress_kokoro/english_stress_kokoro.parquet",
@@ -159,8 +165,9 @@ def prepare_prosodic(sets):
             audio, sr = sf.read(io.BytesIO(row["audio"]["bytes"]), dtype="float32")
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
-            if "target_onset" in row:
-                # natural speech: cut the target word out of the carrier sentence
+            if (
+                "target_onset" in row
+            ):  # recorded speech: cut the word out of its sentence
                 audio = audio[
                     round(row["target_onset"] * sr) : round(row["target_offset"] * sr)
                 ]
@@ -169,16 +176,15 @@ def prepare_prosodic(sets):
             sf.write(
                 audio_dir / f"{row['id']}.wav", audio.astype(np.float32), SAMPLING_RATE
             )
-            # same columns as the prosodic-abx repo's item files; the ABX compares the whole word
+            # the prosodic-abx repo's item columns: the word is phone_sequence,
+            # the stress pattern accent_pattern
             items.append(
                 {
                     "#file": row["id"],
                     "onset": 0.0,
                     "offset": len(audio) / SAMPLING_RATE,
-                    "phone_sequence": row[
-                        "target"
-                    ],  # the word: BY, so only stress differs
-                    "accent_pattern": row["label"],  # stress pattern: ON
+                    "phone_sequence": row["target"],
+                    "accent_pattern": row["label"],
                     "speaker": row["speaker"],
                     "lexical_category": row["lexical_category"],
                 }

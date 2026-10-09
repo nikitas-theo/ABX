@@ -36,14 +36,15 @@ def evaluate_abx(
     for depth, layer in enumerate(info["layers"]):
         if layers is not None and layer not in layers:
             continue
-        datasets = {}  # one load per loader: tasks on the same item file share the features
+        datasets = {}  # tasks with the same loader share the loaded features
         for task in tasks:
             condition, loader, task_fn = get_task(task)
             if loader not in datasets:
-                datasets[loader] = loader(path_items, model_dir / layer, frequency=info["frequency"])
+                datasets[loader] = loader(
+                    path_items, model_dir / layer, frequency=info["frequency"]
+                )
             pair_scores = task_fn(datasets[loader])
-            # one row per contrast (e.g. phone pair A, B) with its labels as returned by the task;
-            # the mean accuracy over rows is the overall ABX accuracy
+            # one row per contrast; their mean accuracy is the overall ABX accuracy
             for pair in pair_scores:
                 labels = {k: v for k, v in pair.items() if k != "score"}
                 results[task].append(
@@ -61,14 +62,15 @@ def evaluate_abx(
                 )
             error_rate = sum(pair["score"] for pair in pair_scores) / len(pair_scores)
             print(f"{layer} {task}: accuracy {1 - error_rate:.4f}")
-        # clean: free this layer's features on the GPU before the next layer is loaded
+        # free this layer's features on the GPU before loading the next
         del datasets
         gc.collect()
         torch.cuda.empty_cache()
 
-    # save results, one file per task
     for task, rows in results.items():
-        results_path = Path(results_dir) / model_name / Path(path_items).stem / f"abx_{task}.csv"
+        results_path = (
+            Path(results_dir) / model_name / Path(path_items).stem / f"abx_{task}.csv"
+        )
         results_path.parent.mkdir(exist_ok=True, parents=True)
         pd.DataFrame(rows).to_csv(results_path, index=False)
         print(f"Saved results to {results_path}")
@@ -82,7 +84,9 @@ if __name__ == "__main__":
         help="Model folder in the activations directory, e.g. wav2vec2-base",
     )
     parser.add_argument("path_items", type=str, help="Path to the items file")
-    parser.add_argument("tasks", type=str, nargs="+", choices=TASK_NAMES, help="ABX tasks to run")
+    parser.add_argument(
+        "tasks", type=str, nargs="+", choices=TASK_NAMES, help="ABX tasks to run"
+    )
     parser.add_argument(
         "--activations_dir",
         type=str,

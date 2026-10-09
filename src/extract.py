@@ -1,5 +1,4 @@
 import argparse
-import gc
 import json
 import math
 from pathlib import Path
@@ -21,10 +20,10 @@ load_dotenv()
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# make dummy annotations file
 def make_annotations(
     audio_dir: str | Path, file_format: str = "flac", file_ids: set | None = None
 ) -> pd.DataFrame:
+    """One annotation spanning each whole audio file, as AnnotatedAudioDataset expects."""
     audio_dir = Path(audio_dir)
     rows = []
     for f in sorted(audio_dir.glob(f"**/*.{file_format}")):
@@ -49,18 +48,14 @@ def extract(
     file_ids: set | None = None,
 ):
     """
-    Save the activations of every layer of the model for every audio file in audio_dir.
+    Save every layer's activations for the audio files in audio_dir (searched recursively)
+    to <out_dir>/<model name>/<layer>/<file id>.pt, plus info.json for run_abx.py.
 
     Args:
-        model_name_or_path (str): The name or path of the model (see src/models.py).
-        audio_dir (str | Path): The directory containing the audio files (searched recursively).
-        file_format (str): The format of the audio files (e.g., "flac").
-        out_dir (str | Path): Activations go to <out_dir>/<model name>/<layer>/<file id>.pt.
-        batch_size (int): Files per forward pass. Files are sorted by duration, so padding is small
-            (median ~0.5% at 16), but the models attend to and normalize over it, so activations differ
-            slightly from one file at a time (batch_size=1, exact).
-        file_ids (set | None): Only extract the files with these names (without extension),
-            e.g. the files an item file uses; all files in audio_dir if None.
+        model_name_or_path (str): A model accepted by src/models.py.
+        file_ids (set | None): Only these files (names without extension); all if None.
+        batch_size (int): Files per forward pass. Files are sorted by duration, so padding is
+            small, but it still changes the activations slightly; 1 is exact.
     """
     audio_dir = Path(audio_dir)
     model_dir = Path(out_dir) / Path(model_name_or_path).name
@@ -88,11 +83,10 @@ def extract(
 
         with torch.no_grad():
             if model_name_or_path == "melhubert":
-                outputs = model(inputs.input_values, inputs.attention_mask)
+                model(inputs.input_values, inputs.attention_mask)
             else:
-                outputs = model(inputs.input_values)
+                model(inputs.input_values)
 
-        # save activations to disk, one file per layer and audio file
         extracted_acts = extr.get_activations()
         layers = list(extracted_acts.keys())
         for layer in layers:
@@ -103,29 +97,18 @@ def extract(
                 batch_data["audio_signal"],
                 extracted_acts[layer],
             ):
-                # drop the frames that only cover batch padding: keep ceil(duration * frame rate),
-                # which is at most one frame past the end of the audio (never used by the item files)
+                # drop the frames that only cover batch padding
                 duration = len(signal) / batch_data["audio_sampling_rate"]
                 n_frames = min(act.shape[0], math.ceil(duration * frequency))
-                # contiguous copy, so only this file's frames are saved (not the whole batch's storage)
+                # a copy, so the file holds only these frames, not the whole batch's storage
                 torch.save(
                     act[:n_frames].clone(memory_format=torch.contiguous_format),
                     layer_dir / f"{Path(audio_path).stem}.pt",
                 )
 
-        # clean
         extr.clear()
-        del inputs, outputs
-        gc.collect()
-        torch.cuda.empty_cache()
 
-    # what run_abx.py needs to read the activations back
-    info = {
-        "model": model_name_or_path,
-        "frequency": frequency,
-        "layers": layers,
-        "audio_dir": str(audio_dir),
-    }
+    info = {"model": model_name_or_path, "frequency": frequency, "layers": layers}
     (model_dir / "info.json").write_text(json.dumps(info, indent=2))
     print(f"Saved activations to {model_dir}")
 

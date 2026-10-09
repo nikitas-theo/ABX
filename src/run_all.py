@@ -1,18 +1,9 @@
-"""Run the whole pipeline for every model: extract activations, run the ABX tasks, delete the activations.
+"""For each model and evaluation set (see EVALS): extract the activations (extract.py), run the
+set's ABX tasks (run_abx.py), then delete the activations, so only one model/set is on disk at a time.
 
-For each model and evaluation set (see EVALS), one at a time (so at most one model's activations for
-one set are on disk, ~44 GB for LibriSpeech dev-clean at float32, a few MB for the prosodic sets):
-    1. extract.py  -> activations/<model>/<layer>/<file id>.pt
-    2. run_abx.py  -> results/<model>/<item file name>/abx_<task>.csv, for every task of the set
-    3. delete activations/<model>/
-Then plot with plot.py (one figure per evaluation set, with all models).
-
-Prepare the audio and item files first with src/prepare_tasks.py.
-A model/set whose results already exist is skipped, so the script can be re-run after a failure.
-
-With --fast, a quick dry run to check that everything works (e.g. on CPU): every evaluation set is
-cut down to a few files (items/fast/), only each model's first and last layer are scored, and results
-go to results/fast/.
+Tasks whose results already exist are skipped, so a failed run can simply be restarted.
+--fast is a quick dry run: a few files per set, first and last layer, results in results/fast/.
+Prepare the data first with src/prepare_tasks.py; plot with src/plot.py.
 
 Usage:
     python -m src.run_all
@@ -22,8 +13,7 @@ Usage:
 
 import os
 
-# fewer "CUDA out of memory" failures from fragmentation when each layer's features are loaded onto
-# the GPU (set before torch is imported)
+# less GPU memory fragmentation when each layer's features are loaded (set before importing torch)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
@@ -46,7 +36,6 @@ ZERO_SHOT_TASKS = [
     "zero_shot_triphone_across",
     "zero_shot_triphone_random",
 ]
-# evaluation set: audio, its file format, the item file, and the ABX tasks to run on it
 EVALS = {
     **{
         f"triphone-{split}": dict(
@@ -57,12 +46,14 @@ EVALS = {
         )
         for split in ["dev-clean", "dev-other"]
     },
-    # the same tasks on a ~10% sample of each split (10 speakers x 25 recordings), see prepare_tasks.py
+    # ~10% samples of the splits, see prepare_tasks.py
     **{
         f"triphone-{split}-sample": dict(
             audio_dir=DATADIR / "LibriSpeech" / split,
             file_format="flac",
-            path_items=ZEROSPEECH_ITEMS.parent / "sample" / f"triphone-{split}-sample.item",
+            path_items=ZEROSPEECH_ITEMS.parent
+            / "sample"
+            / f"triphone-{split}-sample.item",
             tasks=ZERO_SHOT_TASKS,
         )
         for split in ["dev-clean", "dev-other"]
@@ -77,8 +68,6 @@ EVALS = {
         for name in ["stress", "stress_syn", "stress_kokoro"]
     },
 }
-# run by default: the ~10% ZeroSpeech samples (all layers in reasonable time) and the stress sets;
-# the full splits are triphone-dev-clean / triphone-dev-other
 DEFAULT_EVALS = [
     "triphone-dev-clean-sample",
     "triphone-dev-other-sample",
@@ -89,21 +78,24 @@ DEFAULT_EVALS = [
 FAST_RESULTDIR = RESULTDIR / "fast"
 
 
+def separator(path_items):
+    return " " if Path(path_items).suffix == ".item" else ","
+
+
 def read_items(path_items):
-    """Read an item file (.item: space separated, .csv: comma separated) with values kept as written."""
-    separator = " " if Path(path_items).suffix == ".item" else ","
-    return pl.read_csv(path_items, separator=separator, infer_schema=False), separator
+    """An item file with its values kept as written."""
+    return pl.read_csv(path_items, separator=separator(path_items), infer_schema=False)
 
 
 def make_fast_items(path_items):
-    """Write a small subset of an item file to items/fast/, for a quick dry run of the pipeline."""
-    items, separator = read_items(path_items)
+    """Write a small subset of an item file to items/fast/, for a dry run."""
+    items = read_items(path_items)
     if "phone_sequence" in items.columns:
-        # prosodic: 2 words with every speaker (A, B and X say the same word, X by another speaker)
+        # prosodic: 2 words with every speaker
         words = sorted(items["phone_sequence"].unique())[:2]
         items = items.filter(pl.col("phone_sequence").is_in(words))
     else:
-        # zero_shot: 3 files from each of 2 speakers, enough for within- and across-speaker cells
+        # zero_shot: 3 files from each of 2 speakers
         speakers = sorted(items["speaker"].unique())[:2]
         files = [
             f
@@ -113,7 +105,7 @@ def make_fast_items(path_items):
         items = items.filter(pl.col("#file").is_in(files))
     fast_path = ITEMDIR / "fast" / Path(path_items).name
     fast_path.parent.mkdir(parents=True, exist_ok=True)
-    items.write_csv(fast_path, separator=separator)
+    items.write_csv(fast_path, separator=separator(path_items))
     return fast_path
 
 
@@ -133,14 +125,11 @@ def run_model_on_eval(
     fast=False,
     every_n_layers=1,
 ):
-    model_name = Path(
-        model_name_or_path
-    ).name  # folder name used by extract.py and run_abx.py
+    model_name = Path(model_name_or_path).name
     spec = EVALS[eval_name]
     path_items = make_fast_items(spec["path_items"]) if fast else spec["path_items"]
     results_root = FAST_RESULTDIR if fast else RESULTDIR
     results_dir = results_root / model_name / path_items.stem
-    # only the tasks without results yet (e.g. after deleting one task's CSVs to recompute it)
     tasks = [t for t in spec["tasks"] if not (results_dir / f"abx_{t}.csv").exists()]
     if not tasks:
         print(f"Skipping {model_name} on {eval_name}: results already in {results_dir}")
@@ -153,8 +142,7 @@ def run_model_on_eval(
             file_format=spec["file_format"],
             out_dir=ACTIVATIONDIR,
             batch_size=batch_size,
-            # only the audio files the item file uses
-            file_ids=set(read_items(path_items)[0]["#file"]),
+            file_ids=set(read_items(path_items)["#file"]),
         )
         gc.collect()
         torch.cuda.empty_cache()
@@ -172,7 +160,7 @@ def run_model_on_eval(
             results_dir=results_root,
         )
     finally:
-        # delete the activations even if a step failed, so a failure never leaves ~44 GB behind
+        # also on failure, so no activations are left behind
         if not keep_activations:
             shutil.rmtree(ACTIVATIONDIR / model_name, ignore_errors=True)
 
@@ -218,7 +206,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # keep going if one model fails (e.g. a missing checkpoint), and report all failures at the end
+    # keep going if one model fails, and report the failures at the end
     failed = []
     for model_name_or_path in args.models:
         for eval_name in args.evals:

@@ -1,5 +1,5 @@
-# ABX tasks: ZeroSpeech 2021 triphone (within- and across-speaker) and Prosodic ABX (English stress),
-# each with a random baseline
+"""ABX tasks: ZeroSpeech 2021 triphone (within/across speaker), Prosodic ABX (English stress),
+and their random baselines."""
 
 import math
 from decimal import Decimal
@@ -11,8 +11,7 @@ import torch
 from fastabx import Dataset, InMemoryAccessor, Task, Score, Subsampler
 from fastabx.dataset import read_labels
 
-# ZeroSpeech 2021 subsampling: at most 10 instances of A, B or X per cell,
-# and in the across-speaker case at most 5 X per (A, B)
+# ZeroSpeech 2021 subsampling: at most 10 A, B or X per cell, and 5 X per (A, B) across speakers
 MAX_SIZE_GROUP = 10
 MAX_X_ACROSS = 5
 SEED = 0
@@ -23,10 +22,9 @@ LEVELS = [("next-phone", "prev-phone"), "speaker"]
 def get_task(task: str):
     """Return (condition, dataset loader, task function) for a task name.
 
-    The loader builds the fastabx Dataset from (path_items, features_dir, frequency); tasks with the
-    same loader share one loaded dataset. Task functions take that dataset and return one row per
-    contrast (e.g. phone pair A, B) with its labels, "score" (that contrast's ABX error rate) and
-    "size"; the mean score over rows is the overall error rate.
+    Task functions take the loaded fastabx Dataset and return one row per contrast (e.g. phone
+    pair A, B) with its labels, "score" (its ABX error rate) and "size"; the mean score is the
+    overall error rate.
     """
     match task:
         case "zero_shot_triphone_within":
@@ -52,19 +50,16 @@ TASK_NAMES = [
 ]
 
 
-# --- loading features ---
-
-
 def load_dataset(path_items, features_dir, frequency=50):
     """fastabx Dataset from an item file and features_dir/<file id>.pt of shape (n_frames, dim)."""
     return Dataset.from_item(path_items, features_dir, frequency=frequency)
 
 
 def load_dataset_clamped(path_items, features_dir, frequency=50):
-    """Like load_dataset, but a segment that runs past the end of its features is cut at the last frame.
+    """Like load_dataset, but segments running past the end of their features are cut at the last frame.
 
-    Whole-word items (onset 0, offset = clip duration) often end one frame past what the model's
-    convolutions output, which Dataset.from_item rejects; the prosodic-abx repo clamps them like this.
+    Whole-word items often end one frame past the model's output, which Dataset.from_item rejects;
+    the prosodic-abx repo clamps them the same way.
     """
     labels = read_labels(path_items, "#file", "onset", "offset")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -73,8 +68,7 @@ def load_dataset_clamped(path_items, features_dir, frequency=50):
         file_id = row["#file"]
         if file_id not in features:
             features[file_id] = torch.load(Path(features_dir) / f"{file_id}.pt")
-        # same frontiers as fastabx's item_frontiers (in Decimal, as onset/offset are read),
-        # with the end clamped to the features
+        # fastabx's item_frontiers, with the end clamped
         freq, half = Decimal(str(frequency)), Decimal("0.5")
         start = math.ceil(row["onset"] * freq - half)
         end = min(
@@ -88,11 +82,8 @@ def load_dataset_clamped(path_items, features_dir, frequency=50):
     )
 
 
-# --- ZeroSpeech 2021 triphone ABX ---
-
-
 def zero_shot_triphone_within(dataset):
-    # A, B and X all come from the same speaker
+    # A, B and X from the same speaker
     task = Task(
         dataset,
         on="#phone",
@@ -106,7 +97,7 @@ def zero_shot_triphone_within(dataset):
 
 
 def zero_shot_triphone_across(dataset):
-    # A and B from one speaker, X from a different speaker.
+    # A and B from one speaker, X from another
     task = Task(
         dataset,
         on="#phone",
@@ -120,31 +111,21 @@ def zero_shot_triphone_across(dataset):
     return score.details(levels=LEVELS).to_dicts()
 
 
-# --- Prosodic ABX (https://arxiv.org/abs/2604.02102) ---
-
-
 def prosodic_across(dataset):
-    """As in the prosodic-abx repo's run_abx.py."""
-    # ON the stress pattern, BY the word (so only stress differs);
-    # A and B from one speaker, X from a different speaker. No subsampling.
+    """Prosodic ABX (https://arxiv.org/abs/2604.02102), as in the prosodic-abx repo's run_abx.py:
+    stress pattern ON, word BY, across speakers, no subsampling."""
     task = Task(dataset, on="accent_pattern", by=["phone_sequence"], across=["speaker"])
     score = Score(task, "angular")
-    # average over speakers, then over (word, contrast)
     return score.details(levels=["speaker"]).to_dicts()
 
 
-# --- random baselines, like the "random" triplets in internal_tools/tutorials/2_activation_analyses.ipynb ---
-
-
 def shuffle_labels(dataset, on, by):
-    """Return the dataset with the ON labels shuffled within each BY group.
-
-    The task then has the same cells and cell sizes as the real one, but whether A and X share a
-    category is random, so the expected accuracy is chance (0.5).
+    """The dataset with the ON labels shuffled within each BY group: the same cells as the real
+    task, but whether A and X share a category is random, so the expected accuracy is 0.5.
+    (Random baselines like the "random" triplets of the internal_tools tutorial.)
     """
-    # each group needs its own permutation: pl.col(on).shuffle(seed).over(by) would apply the same
-    # one to every group of the same size, i.e. a fixed relabeling that biases the baseline.
-    # Instead, sort the labels within each group by an independent random key per row.
+    # an independent random key per row, so each group gets its own permutation;
+    # pl.col(on).shuffle(seed).over(by) applies the same one to every group of the same size
     key = np.random.default_rng(SEED).random(len(dataset.labels))
     labels = (
         dataset.labels.with_columns(_shuffle_key=pl.Series(key))
@@ -163,4 +144,6 @@ def zero_shot_triphone_random(dataset):
 
 def prosodic_random(dataset):
     """Control for prosodic_across: the same task with the stress labels shuffled within each word."""
-    return prosodic_across(shuffle_labels(dataset, "accent_pattern", ["phone_sequence"]))
+    return prosodic_across(
+        shuffle_labels(dataset, "accent_pattern", ["phone_sequence"])
+    )

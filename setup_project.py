@@ -25,7 +25,7 @@ MODELS = ROOT / "models"
 INTERNAL_TOOLS_REPO = "https://github.com/mdhk/internal_tools.git"
 INTERNAL_TOOLS_REV = "11dac9c"
 
-# CPC and MelHuBERT checkpoints come from the internal_tools tutorial models.zip on Google Drive
+# CPC and MelHuBERT checkpoints: the internal_tools tutorial models.zip on Google Drive
 TUTORIAL_MODELS_GDRIVE_ID = "129Fkg_bQpVB_yN-YT5MVK6ulZS_zjhH6"
 CHECKPOINTS = {
     "cpc": "cpc_checkpoint_106.pt",
@@ -51,7 +51,6 @@ def setup_internal_tools():
 
 
 def setup_environment():
-    # installs everything in pyproject.toml, including internal_tools from external/ (editable)
     step("Python environment (uv sync)")
     run("uv", "sync")
 
@@ -59,15 +58,13 @@ def setup_environment():
 def setup_models(models):
     step(f"Models ({', '.join(models)}) -> {MODELS.relative_to(ROOT)}/")
     MODELS.mkdir(exist_ok=True)
-    # CPC and MelHuBERT come from the same zip, so it is downloaded once for both
     download_tutorial_checkpoints([CHECKPOINTS[m] for m in models if m in CHECKPOINTS])
     for model in models:
         if model in CHECKPOINTS:
             continue
         elif model == "spidr":
             print("    spidr is loaded through torch.hub when it is first used")
-        else:  # a HuggingFace model id
-            # .env holds HF_TOKEN (optional) for authenticated downloads; uv errors if the file is missing
+        else:  # a HuggingFace model id; .env holds HF_TOKEN (uv errors if it is missing)
             env_file = ["--env-file", ".env"] if (ROOT / ".env").exists() else []
             run(
                 "uv",
@@ -91,7 +88,7 @@ def download_tutorial_checkpoints(filenames):
         with zipfile.ZipFile(archive) as zf:
             zf.extractall(tmp)
         for filename in missing:
-            # the zip's folder layout is not documented, so search it for the checkpoint by name
+            # the zip's layout is undocumented, so search it by name
             found = list(Path(tmp).rglob(filename))
             if not found:
                 sys.exit(f"{filename} not found in the tutorial models.zip")

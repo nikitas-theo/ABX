@@ -1,19 +1,21 @@
-from transformers import AutoModel, Wav2Vec2ForCTC, HubertForCTC, WavLMForCTC
-from huggingface_hub import hf_hub_download
 import torch
-from internal_tools.preprocessors import AudioPreprocessor
+from huggingface_hub import hf_hub_download
 from internal_tools.models import (
+    load_BabyHuBERT_model,
     load_CPC_model,
     load_MelHuBERT_model,
-    load_BabyHuBERT_model,
 )
+from internal_tools.preprocessors import AudioPreprocessor
+from transformers import AutoModel
+
 from src.config import MODELDIR
 
 
 def get_model(model_name_or_path: str):
-    """Return (model, preprocessor, frame rate of the activations in Hz)."""
-    # mirrors internal_tools/tutorials/model_loading_utils.py
-    frequency = 50  # 20 ms frames
+    """Return (model, preprocessor, frame rate of the activations in Hz).
+
+    Mirrors internal_tools/tutorials/model_loading_utils.py.
+    """
     match model_name_or_path:
         case (
             "facebook/wav2vec2-base"
@@ -24,49 +26,27 @@ def get_model(model_name_or_path: str):
             preprocessor = AudioPreprocessor.for_hf_model(
                 model_name_or_path, cache_dir=MODELDIR
             )
-        case "facebook/wav2vec2-base-960h":
-            model = Wav2Vec2ForCTC.from_pretrained(
-                model_name_or_path, cache_dir=MODELDIR
-            )
-            preprocessor = AudioPreprocessor.for_hf_model(
-                model_name_or_path, cache_dir=MODELDIR
-            )
-        case "facebook/hubert-large-ls960-ft":
-            model = HubertForCTC.from_pretrained(model_name_or_path, cache_dir=MODELDIR)
-            preprocessor = AudioPreprocessor.for_hf_model(
-                model_name_or_path, cache_dir=MODELDIR
-            )
-        case "patrickvonplaten/wavlm-libri-clean-100h-base":
-            model = WavLMForCTC.from_pretrained(model_name_or_path, cache_dir=MODELDIR)
-            preprocessor = AudioPreprocessor.for_hf_model(
-                model_name_or_path, cache_dir=MODELDIR
-            )
+            return model, preprocessor, 50
         case "MarvinLvn/BabyHuBERT":
             ckpt = hf_hub_download(
-                repo_id=model_name_or_path,
-                filename="BabyHuBERT.ckpt",
-                cache_dir=MODELDIR,
+                model_name_or_path, "BabyHuBERT.ckpt", cache_dir=MODELDIR
             )
-            model = load_BabyHuBERT_model(ckpt)
+            # no preprocessor config on the hub: internal_tools falls back to wav2vec2-base's
             preprocessor = AudioPreprocessor.for_hf_model(
                 model_name_or_path, cache_dir=MODELDIR
             )
+            return load_BabyHuBERT_model(ckpt), preprocessor, 50
         case "spidr":
             model = torch.hub.load("facebookresearch/spidr", "spidr_base")
-            # the channels-last CNN path calls F.conv2d with the conv weights directly, so the
-            # forward hook internal_tools puts on feature_extractor.conv_layers[-1].conv never fires;
-            # the standard path runs the same weights through that module
+            # the channels-last CNN path bypasses conv_layers[-1].conv, where internal_tools hooks "CNN"
             model.feature_extractor.channels_last = False
-            preprocessor = AudioPreprocessor.for_spidr_model()
-        case "cpc":
-            model = load_CPC_model(MODELDIR / "cpc_checkpoint_106.pt")
-            preprocessor = AudioPreprocessor.for_cpc_model()
-            frequency = (
-                100  # CPC encoder strides 5*4*2*2*2 = 160 samples = 10 ms frames
-            )
+            return model, AudioPreprocessor.for_spidr_model(), 50
         case "melhubert":
             model = load_MelHuBERT_model(MODELDIR / "melhubert_960_stage2_20ms.ckpt")
-            preprocessor = AudioPreprocessor.for_melhubert_model()
+            return model, AudioPreprocessor.for_melhubert_model(), 50
+        case "cpc":
+            # 10 ms frames: the encoder strides multiply to 160 samples
+            model = load_CPC_model(MODELDIR / "cpc_checkpoint_106.pt")
+            return model, AudioPreprocessor.for_cpc_model(), 100
         case _:
             raise ValueError(f"Unsupported model: {model_name_or_path}")
-    return model, preprocessor, frequency
